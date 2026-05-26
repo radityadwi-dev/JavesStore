@@ -7,10 +7,22 @@ interface GameCardProps {
   imageFit?: 'cover' | 'contain';
   imagePosition?: string;
   imageScale?: string;
+  imageLoading?: 'eager' | 'lazy';
+  imageFetchPriority?: 'high' | 'low' | 'auto';
   onClick?: () => void;
 }
 
-const GameCard = ({ title, accent, imageSrc, imageFit = 'cover', imagePosition = 'center', imageScale = '100%', onClick }: GameCardProps) => {
+const GameCard = ({
+  title,
+  accent,
+  imageSrc,
+  imageFit = 'cover',
+  imagePosition = 'center',
+  imageScale = '100%',
+  imageLoading = 'lazy',
+  imageFetchPriority = 'auto',
+  onClick,
+}: GameCardProps) => {
   const content = (
     <div className={`card-image-wrapper ${accent}`}>
       {imageSrc ? (
@@ -19,6 +31,9 @@ const GameCard = ({ title, accent, imageSrc, imageFit = 'cover', imagePosition =
             src={imageSrc}
             alt={title}
             className={`card-artwork-image ${imageFit === 'contain' ? 'is-contain' : 'is-cover'}`}
+            loading={imageLoading}
+            decoding="async"
+            fetchPriority={imageFetchPriority}
             style={{
               objectPosition: imagePosition,
               transform: `scale(${Number.parseFloat(imageScale) / 100})`,

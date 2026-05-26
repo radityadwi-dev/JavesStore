@@ -99,6 +99,7 @@
   font-size: 1rem;
   font-weight: 600;
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
   transition: color 0.2s ease, transform 0.2s ease;
 }
@@ -106,6 +107,19 @@
 .site-sidebar-link:hover {
   color: #dbeafe;
   transform: translateX(2px);
+}
+
+.site-sidebar-support {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: auto;
+  min-height: 48px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  color: #ffffff;
+  font-weight: 700;
+  text-decoration: none;
 }
 
 @media (max-width: 640px) {

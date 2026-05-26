@@ -1,6 +1,6 @@
-import { BookText, Globe2, Home, Search, Users, X } from 'lucide-react';
+import { FileText, Headphones, Home, Info, ShieldCheck, X } from 'lucide-react';
 import '../assets/sidebar.css';
-import sidebarLogo from '../assets/sidebar-logo.jpeg';
+import sidebarLogo from '../assets/pict/sidebar-logo.jpeg';
 
 interface SidebarProps {
   isOpen: boolean;
@@ -8,11 +8,11 @@ interface SidebarProps {
 }
 
 const menuItems = [
-  { label: 'Beranda', icon: Home },
-  { label: 'Lacak Pesanan', icon: Search },
-  { label: 'Pusat Informasi', icon: BookText },
-  { label: 'Periksa Negara Akun', icon: Globe2 },
-  { label: 'Komunitas DarkSystem', icon: Users },
+  { label: 'Beranda', icon: Home, href: '#/' },
+  { label: 'Tentang Kami', icon: Info, href: '#/about' },
+  { label: 'Kontak Support', icon: Headphones, href: '#/contact' },
+  { label: 'Kebijakan Privasi', icon: ShieldCheck, href: '#/privacy-policy' },
+  { label: 'Ketentuan Layanan', icon: FileText, href: '#/terms' },
 ];
 
 const Sidebar = ({ isOpen, onClose }: SidebarProps) => {
@@ -49,15 +49,15 @@ const Sidebar = ({ isOpen, onClose }: SidebarProps) => {
             const Icon = item.icon;
 
             return (
-              <button
+              <a
                 key={item.label}
-                type="button"
                 className="site-sidebar-link"
+                href={item.href}
                 onClick={onClose}
               >
                 <Icon size={20} />
                 <span>{item.label}</span>
-              </button>
+              </a>
             );
           })}
         </nav>

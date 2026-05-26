@@ -1,39 +1,135 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import GameCard from '../components/GameCard';
 import '../assets/homepage.css';
 import { games } from '../data/games';
-import homepageBanner from '../assets/homepage-banner.jpeg';
+import homeBannerOne from '../assets/pict/home-banner-1.png';
+import homeBannerTwo from '../assets/pict/home-banner-2.png';
+import homeBannerThree from '../assets/pict/home-banner-3.png';
 
 interface HomePageProps {
   onSelectGame: (slug: string) => void;
 }
 
-const jokiGames = [
-  { id: 'jg-1', title: 'Joki Rank Mobile Legends', category: 'Push Rank', accent: 'accent-cyan' },
-  { id: 'jg-2', title: 'Joki Bintang Honor of Kings', category: 'Rank Service', accent: 'accent-gold' },
-  { id: 'jg-3', title: 'Joki Classic ke Mythic', category: 'Tier Boost', accent: 'accent-red' },
-  { id: 'jg-4', title: 'Joki Genshin Daily Quest', category: 'Daily Mission', accent: 'accent-violet' },
-  { id: 'jg-5', title: 'Joki PUBG Push Tier', category: 'Survival Rank', accent: 'accent-green' },
-  { id: 'jg-6', title: 'Joki CODM Ranked Match', category: 'Ranked Service', accent: 'accent-indigo' },
+const heroBanners = [
+  { id: 'home-banner-1', src: homeBannerOne, alt: 'Banner promo utama Javes Store 1' },
+  { id: 'home-banner-2', src: homeBannerTwo, alt: 'Banner promo utama Javes Store 2' },
+  { id: 'home-banner-3', src: homeBannerThree, alt: 'Banner promo utama Javes Store 3' },
 ];
 
-const HomePage = ({ onSelectGame }: HomePageProps) => {
-  const [activeSection, setActiveSection] = useState<'popular' | 'joki'>('popular');
+const loopingHeroBanners = [...heroBanners, heroBanners[0]];
+const INITIAL_EAGER_CARD_COUNT = 6;
 
-  const activeItems = useMemo(
-    () => (activeSection === 'popular' ? games : jokiGames),
-    [activeSection],
-  );
+const HomePage = ({ onSelectGame }: HomePageProps) => {
+  const [activeBanner, setActiveBanner] = useState(0);
+  const [isBannerAnimating, setIsBannerAnimating] = useState(true);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setIsBannerAnimating(true);
+      setActiveBanner((currentBanner) => currentBanner + 1);
+    }, 5000);
+
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    heroBanners.forEach((banner) => {
+      const image = new Image();
+      image.src = banner.src;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isBannerAnimating) {
+      const timeoutId = window.setTimeout(() => {
+        setIsBannerAnimating(true);
+      }, 40);
+
+      return () => window.clearTimeout(timeoutId);
+    }
+  }, [isBannerAnimating]);
+
+  const showPreviousBanner = () => {
+    setIsBannerAnimating(true);
+    setActiveBanner((currentBanner) => {
+      if (currentBanner === 0) {
+        return heroBanners.length - 1;
+      }
+
+      return currentBanner - 1;
+    });
+  };
+
+  const showNextBanner = () => {
+    setIsBannerAnimating(true);
+    setActiveBanner((currentBanner) => currentBanner + 1);
+  };
+
+  const handleBannerTransitionEnd = () => {
+    if (activeBanner !== heroBanners.length) {
+      return;
+    }
+
+    setIsBannerAnimating(false);
+    setActiveBanner(0);
+  };
 
   return (
     <section className="home-section">
       <div className="home-banner-shell">
         <div className="home-banner">
-          <img
-            src={homepageBanner}
-            alt="Banner promo top up Javes Store"
-            className="home-banner-image"
-          />
+          <div
+            className={`home-banner-track ${isBannerAnimating ? '' : 'is-resetting'}`.trim()}
+            style={{ transform: `translateX(-${activeBanner * 100}%)` }}
+            onTransitionEnd={handleBannerTransitionEnd}
+          >
+            {loopingHeroBanners.map((banner, index) => (
+              <div className="home-banner-slide" key={`${banner.id}-${index}`}>
+                <img
+                  src={banner.src}
+                  alt={index === heroBanners.length ? '' : banner.alt}
+                  className="home-banner-image"
+                  aria-hidden={index === heroBanners.length}
+                  loading="eager"
+                  decoding="async"
+                  fetchPriority={index === 0 ? 'high' : 'auto'}
+                />
+              </div>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="home-banner-nav is-prev"
+            onClick={showPreviousBanner}
+            aria-label="Banner sebelumnya"
+          >
+            &#8249;
+          </button>
+          <button
+            type="button"
+            className="home-banner-nav is-next"
+            onClick={showNextBanner}
+            aria-label="Banner berikutnya"
+          >
+            &#8250;
+          </button>
+
+          <div className="home-banner-dots" aria-label="Pilih banner utama">
+            {heroBanners.map((banner, index) => (
+              <button
+                key={banner.id}
+                type="button"
+                className={`home-banner-dot ${index === activeBanner % heroBanners.length ? 'is-active' : ''}`}
+                onClick={() => {
+                  setIsBannerAnimating(true);
+                  setActiveBanner(index);
+                }}
+                aria-label={`Tampilkan banner ${index + 1}`}
+                aria-pressed={index === activeBanner % heroBanners.length}
+              />
+            ))}
+          </div>
         </div>
       </div>
 
@@ -46,25 +142,12 @@ const HomePage = ({ onSelectGame }: HomePageProps) => {
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={activeSection === 'popular'}
-                  className={`section-inline-tab ${activeSection === 'popular' ? 'is-active' : ''}`}
-                  onClick={() => setActiveSection('popular')}
+                  aria-selected="true"
+                  className="section-inline-tab is-active"
                 >
                   Game Populer
                 </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeSection === 'joki'}
-                  className={`section-inline-tab ${activeSection === 'joki' ? 'is-active' : ''}`}
-                  onClick={() => setActiveSection('joki')}
-                >
-                  Joki Game
-                </button>
-                <span
-                  className={`section-inline-indicator ${activeSection === 'joki' ? 'is-joki' : 'is-popular'}`}
-                  aria-hidden="true"
-                />
+                <span className="section-inline-indicator is-popular" aria-hidden="true" />
               </div>
             </div>
           </div>
@@ -72,15 +155,17 @@ const HomePage = ({ onSelectGame }: HomePageProps) => {
         <div className="section-divider"></div>
 
         <div className="game-grid">
-          {activeItems.map((item) => (
+          {games.map((item, index) => (
             <GameCard
               key={item.id}
               title={item.title}
               accent={item.accent}
               imageSrc={'image' in item ? item.image : undefined}
-              imageFit={'imageFit' in item ? item.imageFit : undefined}
-              imagePosition={'imagePosition' in item ? item.imagePosition : undefined}
-              imageScale={'imageScale' in item ? item.imageScale : undefined}
+              imageFit={'cardImageFit' in item ? item.cardImageFit ?? item.imageFit : undefined}
+              imagePosition={'cardImagePosition' in item ? item.cardImagePosition ?? item.imagePosition : undefined}
+              imageScale={'cardImageScale' in item ? item.cardImageScale ?? item.imageScale : undefined}
+              imageLoading={'image' in item ? (index < INITIAL_EAGER_CARD_COUNT ? 'eager' : 'lazy') : undefined}
+              imageFetchPriority={'image' in item ? (index < INITIAL_EAGER_CARD_COUNT ? 'auto' : 'low') : undefined}
               onClick={'slug' in item ? () => onSelectGame(item.slug) : undefined}
             />
           ))}

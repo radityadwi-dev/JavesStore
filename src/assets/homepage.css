@@ -20,8 +20,22 @@
   position: relative;
   overflow: hidden;
   border-radius: 24px;
-  background: linear-gradient(135deg, #2d7d0f 0%, #9adf1d 100%);
+  background: linear-gradient(135deg, #10141f 0%, #1a2030 100%);
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.24);
+}
+
+.home-banner-track {
+  display: flex;
+  transition: transform 0.45s ease;
+  will-change: transform;
+}
+
+.home-banner-track.is-resetting {
+  transition: none;
+}
+
+.home-banner-slide {
+  flex: 0 0 100%;
 }
 
 .home-banner::after {
@@ -35,9 +49,72 @@
 .home-banner-image {
   display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
   aspect-ratio: 16 / 5;
   object-fit: cover;
+}
+
+.home-banner-nav {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.58);
+  color: #f8fafc;
+  font-size: 1.9rem;
+  line-height: 1;
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.home-banner-nav:hover {
+  background: rgba(15, 23, 42, 0.8);
+}
+
+.home-banner-nav:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.9);
+  outline-offset: 2px;
+}
+
+.home-banner-nav.is-prev {
+  left: 18px;
+}
+
+.home-banner-nav.is-next {
+  right: 18px;
+}
+
+.home-banner-dots {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+}
+
+.home-banner-dot {
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.48);
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.home-banner-dot.is-active {
+  background: #ffffff;
+  transform: scale(1.15);
 }
 
 .game-grid {
@@ -161,6 +238,24 @@
     aspect-ratio: 16 / 7;
   }
 
+  .home-banner-nav {
+    width: 38px;
+    height: 38px;
+    font-size: 1.65rem;
+  }
+
+  .home-banner-nav.is-prev {
+    left: 12px;
+  }
+
+  .home-banner-nav.is-next {
+    right: 12px;
+  }
+
+  .home-banner-dots {
+    bottom: 12px;
+  }
+
   .section-title {
     font-size: 1.5rem;
   }
@@ -207,6 +302,21 @@
 
   .home-banner-image {
     aspect-ratio: 4 / 3;
+  }
+
+  .home-banner-nav {
+    width: 34px;
+    height: 34px;
+    font-size: 1.45rem;
+  }
+
+  .home-banner-dots {
+    gap: 6px;
+  }
+
+  .home-banner-dot {
+    width: 8px;
+    height: 8px;
   }
 
   .game-grid {

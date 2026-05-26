@@ -3,12 +3,12 @@ import { ArrowLeft, ArrowRight, BadgeHelp, ChevronDown, ChevronUp, Info, ShieldC
 import '../assets/game-detail.css';
 import { paymentGroups } from '../data/games';
 import type { GameDetail } from '../data/games';
-import type { PendingPayment } from '../types/payment';
+import type { PaymentDraft } from '../types/payment';
 
 interface GameDetailPageProps {
   game: GameDetail;
   onBack: () => void;
-  onStartPayment: (payment: PendingPayment) => void;
+  onStartPayment: (payment: PaymentDraft) => Promise<void>;
 }
 
 type NoticeState = {
@@ -16,28 +16,436 @@ type NoticeState = {
   variant: 'info' | 'error';
 };
 
+type ApiService = {
+  code: string;
+  game: string;
+  name: string;
+  price: {
+    basic: number;
+    premium?: number;
+    special?: number;
+  };
+  description?: string | null;
+  server?: string;
+  status?: string;
+};
+
+type DisplayPackage = NonNullable<GameDetail['packages']>[number] & {
+  serviceCode?: string;
+  sellingPrice?: number;
+  resellerPrice?: number;
+};
+
+type NicknameLookupResponse = {
+  success?: boolean;
+  nickname?: string;
+  message?: string;
+};
+
+type NicknameLookupState = {
+  status: 'idle' | 'loading' | 'success' | 'error';
+  nickname: string;
+  message: string;
+};
+
+const API_BASE_URL =
+  typeof window !== 'undefined' &&
+  (
+    window.location.hostname === 'javestopup.site' ||
+    window.location.hostname === 'www.javestopup.site'
+  )
+    ? window.location.origin
+    : 'http://141.11.25.134:3000';
+
+const NICKNAME_API_BASE_URL =
+  typeof window !== 'undefined' &&
+  (
+    window.location.hostname === 'javestopup.site' ||
+    window.location.hostname === 'www.javestopup.site'
+  )
+    ? window.location.origin
+    : 'https://javestopup.site';
+
+const resellerGameNamesBySlug: Record<string, string[]> = {
+  'arena-breakout': ['Arena Breakout'],
+  'arena-breakout-infinite-pc': ['Arena Breakout: Infinite (PC)'],
+  'arena-of-valor': ['Arena of Valor'],
+  'call-of-duty-mobile': ['Call Of Duty Mobile (Indonesia)', 'Call of Duty Mobile (Indonesia)'],
+  'fc-mobile': ['EA SPORTS FC Mobile'],
+  'free-fire': ['Free Fire'],
+  'genshin-impact': ['Genshin Impact'],
+  'honor-of-kings': ['Honor of Kings Global', 'Honor of Kings'],
+  'league-of-legends': ['League of Legends'],
+  'mobile-legends': ['Mobile Legends A', 'Mobile Legends', 'Mobile Legends (Global)'],
+  'pubg-mobile': ['PUBG Mobile'],
+  'roblox': ['Roblox'],
+  'valorant': ['Valorant'],
+  'zepeto': ['Zepetto', 'Zepeto'],
+};
+
+const strictServiceSyncGames = new Set(['mobile-legends']);
+
+type ApiServicesResponse = {
+  result?: boolean;
+  data?: ApiService[] | null;
+  message?: string;
+};
+
+const cachedServicesBySlug = new Map<string, ApiService[]>();
+const servicesRequestBySlug = new Map<string, Promise<ApiService[]>>();
+
+const canonicalizeUnit = (value: string) =>
+  value
+    .replace(/\bdiamonds\b/g, 'diamond')
+    .replace(/\bpoints\b/g, 'point')
+    .replace(/\bbonds\b/g, 'bond')
+    .replace(/\btokens\b/g, 'token')
+    .replace(/\bvouchers\b/g, 'voucher')
+    .replace(/\bcores\b/g, 'core')
+    .replace(/\bcandies\b/g, 'candy')
+    .replace(/\bzems\b/g, 'zem')
+    .replace(/\bcoins\b/g, 'coin');
+
+const matchableUnitPhrases = [
+  'weekly diamond pass',
+  'weekly card',
+  'weekly pass',
+  'monthly card',
+  'first recharge',
+  'b chip',
+  'fc point',
+  'diamond',
+  'point',
+  'token',
+  'voucher',
+  'core',
+  'candy',
+  'zem',
+  'coin',
+  'bond',
+  'crystal',
+  'silver',
+  'gold',
+  'pack',
+  'pass',
+  'cash',
+  'uc',
+  'cp',
+  'nc',
+].sort((left, right) => right.length - left.length);
+
+const normalizeText = (value: string) =>
+  canonicalizeUnit(
+    value
+      .toLowerCase()
+      .replace(/(\d)[.,](\d)/g, '$1$2')
+      .replace(/\([^)]*\)/g, ' ')
+      .replace(/\b(\d+)x\b/g, '$1')
+      .replace(/\s+/g, ' ')
+      .replace(/[^\w#+]+/g, ' ')
+      .trim(),
+  );
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const getNameVariants = (name: string) => {
+  const normalizedName = normalizeText(name);
+  const compactName = normalizedName.replace(/\bbonus\b/g, '').replace(/\s+/g, ' ').trim();
+  const leadingAmountMatch = compactName.match(/^(\d+(?:\s+\d+)*)\s+([a-z#+]+)/);
+  const variants = new Set<string>([normalizedName, compactName]);
+
+  if (leadingAmountMatch) {
+    variants.add(`${leadingAmountMatch[1]} ${leadingAmountMatch[2]}`.trim());
+  }
+
+  matchableUnitPhrases.forEach((unitPhrase) => {
+    const matcher = new RegExp(`(\\d+(?:\\s+\\d+)*)\\s+${escapeRegExp(unitPhrase)}\\b`, 'g');
+
+    for (const match of compactName.matchAll(matcher)) {
+      variants.add(`${match[1]} ${unitPhrase}`.trim());
+    }
+  });
+
+  return Array.from(variants).filter(Boolean);
+};
+
+const parseLocalPrice = (value: string) => Number(value.replace(/[^\d]/g, ''));
+
+const formatDisplayPrice = (value: number) => `Rp${value.toLocaleString('id-ID')}`;
+
+const getSelectedPackageBasePrice = (item: { price: string; sellingPrice?: number }) =>
+  item.sellingPrice ?? parseLocalPrice(item.price);
+
+const getServicePrice = (service: ApiService) => service.price.basic ?? service.price.premium ?? service.price.special ?? 0;
+
+const inferRemotePackageGroup = (gameSlug: string, serviceName: string) => {
+  const normalizedServiceName = normalizeText(serviceName);
+
+  if (gameSlug === 'mobile-legends') {
+    if (normalizedServiceName.includes('pass')) {
+      return 'weekly-pass';
+    }
+
+    return 'diamonds';
+  }
+
+  return 'general';
+};
+
+const getServicesByGame = async (gameSlug: string, resellerGameNames: string[]) => {
+  const cachedServices = cachedServicesBySlug.get(gameSlug);
+
+  if (cachedServices) {
+    return cachedServices;
+  }
+
+  const pendingRequest = servicesRequestBySlug.get(gameSlug);
+
+  if (pendingRequest) {
+    return pendingRequest;
+  }
+
+  const request = (async () => {
+    for (const resellerGameName of resellerGameNames) {
+      const response = await fetch(
+        `${API_BASE_URL}/api/services?${new URLSearchParams({ filter_game: resellerGameName }).toString()}`,
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `GET /api/services?filter_game=${encodeURIComponent(resellerGameName)} gagal dengan status ${response.status}`,
+        );
+      }
+
+      const payload = (await response.json()) as ApiServicesResponse;
+      const services = payload.data ?? [];
+
+      if (payload.result === false && payload.message === 'Layanan tidak ditemukan.') {
+        continue;
+      }
+
+      if (services.length > 0) {
+        return services;
+      }
+    }
+
+    return [];
+  })()
+    .then((services) => {
+      cachedServicesBySlug.set(gameSlug, services);
+      return services;
+    })
+    .finally(() => {
+      servicesRequestBySlug.delete(gameSlug);
+    });
+
+  servicesRequestBySlug.set(gameSlug, request);
+
+  return request;
+};
+
+const renderPaymentMethodVisual = (groupId: string, method: (typeof paymentGroups)[number]['methods'][number], className?: string) => {
+  if (method.logoSrc) {
+    return <img src={method.logoSrc} alt={method.logoAlt ?? method.brand} className={className ?? 'detail-payment-logo'} />;
+  }
+
+  return <span className={`detail-payment-badge detail-payment-badge-${groupId}`}>{method.brand}</span>;
+};
+
 const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) => {
-  const isMobileLegends = game.slug === 'mobile-legends';
+  const isPosterHero = game.imageFit === 'contain' && Boolean(game.heroMinHeight);
   const [selectedPackageGroup, setSelectedPackageGroup] = useState('');
   const [selectedPackageId, setSelectedPackageId] = useState('');
   const [expandedPaymentId, setExpandedPaymentId] = useState('');
   const [selectedPaymentMethodId, setSelectedPaymentMethodId] = useState('');
   const [isCheckoutDialogOpen, setIsCheckoutDialogOpen] = useState(false);
   const [playerId, setPlayerId] = useState('');
-  const [serverZone, setServerZone] = useState('');
+  const [secondaryFieldValue, setSecondaryFieldValue] = useState('');
   const [whatsAppNumber, setWhatsAppNumber] = useState('');
   const [paymentNotice, setPaymentNotice] = useState<NoticeState | null>(null);
+  const [availablePackages, setAvailablePackages] = useState<DisplayPackage[]>([]);
+  const [isLoadingServices, setIsLoadingServices] = useState(false);
+  const [servicesError, setServicesError] = useState<string | null>(null);
+  const [isCreatingInvoice, setIsCreatingInvoice] = useState(false);
+  const [nicknameLookup, setNicknameLookup] = useState<NicknameLookupState>({
+    status: 'idle',
+    nickname: '',
+    message: '',
+  });
   const customerSectionRef = useRef<HTMLElement | null>(null);
   const packageSectionRef = useRef<HTMLElement | null>(null);
   const playerIdInputRef = useRef<HTMLInputElement | null>(null);
   const serverZoneInputRef = useRef<HTMLInputElement | null>(null);
   const whatsAppInputRef = useRef<HTMLInputElement | null>(null);
   const noticeTimeoutRef = useRef<number | null>(null);
+  const nicknameRequestIdRef = useRef(0);
 
   const selectedPackage = useMemo(
-    () => game.packages.find((item) => item.id === selectedPackageId),
-    [game.packages, selectedPackageId],
+    () => availablePackages.find((item) => item.id === selectedPackageId),
+    [availablePackages, selectedPackageId],
   );
+
+  useEffect(() => {
+    let isActive = true;
+
+    const resellerGameNames = resellerGameNamesBySlug[game.slug] ?? [game.title];
+    const isStrictServiceSync = strictServiceSyncGames.has(game.slug);
+
+    const toLocalPackageFallback = () =>
+      game.packages.map((item) => ({
+        ...item,
+        price: formatDisplayPrice(getSelectedPackageBasePrice(item)),
+        sellingPrice: parseLocalPrice(item.price),
+      }));
+
+    const localPackagesByName = new Map<string, GameDetail['packages'][number]>();
+
+    game.packages.forEach((item) => {
+      getNameVariants(item.name).forEach((variant) => {
+        if (!localPackagesByName.has(variant)) {
+          localPackagesByName.set(variant, item);
+        }
+      });
+    });
+
+    const syncPackagesForGame = async () => {
+      setIsLoadingServices(true);
+      setServicesError(null);
+      const localPackages = toLocalPackageFallback();
+      setAvailablePackages(isStrictServiceSync ? [] : localPackages);
+
+      if (resellerGameNames.length === 0) {
+        setIsLoadingServices(false);
+        return;
+      }
+
+      try {
+        const services = await getServicesByGame(game.slug, resellerGameNames);
+
+        const availableServices = services.filter(
+          (service) => !service.status || service.status === 'available',
+        );
+
+        const getMatchedLocalPackage = (serviceName: string) =>
+          getNameVariants(serviceName)
+            .map((variant) => localPackagesByName.get(variant))
+            .find((item): item is GameDetail['packages'][number] => Boolean(item));
+
+        const remotePackages = availableServices
+          .map((service) => {
+            const localPackage = getMatchedLocalPackage(service.name);
+            const servicePrice = getServicePrice(service);
+            const localSellingPrice = localPackage ? parseLocalPrice(localPackage.price) : undefined;
+            const effectiveSellingPrice =
+              typeof localSellingPrice === 'number'
+                ? Math.max(localSellingPrice, servicePrice)
+                : servicePrice;
+
+            return {
+              id: service.code,
+              name: localPackage?.name ?? service.name,
+              price: formatDisplayPrice(
+                getSelectedPackageBasePrice({
+                  price: formatDisplayPrice(effectiveSellingPrice),
+                  sellingPrice: effectiveSellingPrice,
+                }),
+              ),
+              group: localPackage?.group ?? inferRemotePackageGroup(game.slug, service.name),
+              bonus: localPackage?.bonus,
+              discount: localPackage?.discount,
+              serviceCode: service.code,
+              sellingPrice: effectiveSellingPrice,
+              resellerPrice: servicePrice,
+            } satisfies DisplayPackage;
+          })
+          .sort((left, right) => (left.sellingPrice ?? 0) - (right.sellingPrice ?? 0));
+
+        const cheapestServiceByName = new Map<string, ApiService>();
+
+        availableServices.forEach((service) => {
+          const localPackage = getMatchedLocalPackage(service.name);
+          const normalizedName = localPackage ? normalizeText(localPackage.name) : normalizeText(service.name);
+          const currentService = cheapestServiceByName.get(normalizedName);
+          const servicePrice = getServicePrice(service);
+
+          if (!currentService || servicePrice < getServicePrice(currentService)) {
+            cheapestServiceByName.set(normalizedName, service);
+          }
+        });
+
+        const mappedPackages = Array.from(cheapestServiceByName.values())
+          .map((service) => {
+            const localPackage = getMatchedLocalPackage(service.name);
+            const servicePrice = getServicePrice(service);
+
+            if (!localPackage) {
+              console.warn(
+                `[pricing] Missing selling price mapping for serviceCode "${service.code}" and product "${service.name}" in game "${game.slug}".`,
+              );
+              return null;
+            }
+
+            const localSellingPrice = parseLocalPrice(localPackage.price);
+            const effectiveSellingPrice = Math.max(localSellingPrice, servicePrice);
+
+            return {
+              id: service.code,
+              name: localPackage.name,
+              price: formatDisplayPrice(
+                getSelectedPackageBasePrice({
+                  price: formatDisplayPrice(effectiveSellingPrice),
+                  sellingPrice: effectiveSellingPrice,
+                }),
+              ),
+              group: localPackage.group,
+              bonus: localPackage.bonus,
+              discount: localPackage.discount,
+              serviceCode: service.code,
+              sellingPrice: effectiveSellingPrice,
+              resellerPrice: servicePrice,
+            } satisfies DisplayPackage;
+          })
+          .filter((item) => item !== null) as DisplayPackage[];
+
+        const nextPackages =
+          isStrictServiceSync
+            ? remotePackages
+            : mappedPackages.length > 0
+            ? mappedPackages.sort((left, right) => (left.sellingPrice ?? 0) - (right.sellingPrice ?? 0))
+            : toLocalPackageFallback();
+
+        if (isActive) {
+          setAvailablePackages(nextPackages);
+          setServicesError(
+            isStrictServiceSync && remotePackages.length === 0
+              ? 'Katalog produk otomatis belum tersedia untuk game ini.'
+              : mappedPackages.length === 0 && services.length > 0 && !isStrictServiceSync
+              ? 'Produk reseller ditemukan, tetapi nama nominal belum sinkron penuh dengan daftar website.'
+              : null,
+          );
+        }
+      } catch {
+        if (isActive) {
+          setAvailablePackages(isStrictServiceSync ? [] : localPackages);
+          setServicesError(
+            isStrictServiceSync
+              ? 'Produk reseller belum bisa dimuat untuk game ini. Coba lagi beberapa saat.'
+              : 'Produk reseller belum bisa dimuat, sementara memakai daftar lokal.',
+          );
+        }
+      } finally {
+        if (isActive) {
+          setIsLoadingServices(false);
+        }
+      }
+    };
+
+    void syncPackagesForGame();
+
+    return () => {
+      isActive = false;
+    };
+  }, [game]);
 
   const packageGroups = useMemo(() => {
     const seen = new Set<string>();
@@ -45,9 +453,52 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
       diamonds: 0,
       membership: 1,
       'weekly-pass': 2,
+      'weekly-card': 3,
+      points: 4,
+      tokens: 5,
+      zems: 6,
+      coins: 7,
+      passes: 8,
+      bonds: 9,
+      golds: 10,
+      cp: 11,
+      'fc-points': 12,
+      silver: 13,
+      packs: 14,
+      'monthly-card': 15,
+      'b-chips': 16,
+      crystals: 17,
+      cores: 18,
+      'first-recharge': 19,
+      cash: 20,
+      nc: 21,
+      uc: 22,
+      candies: 23,
     };
 
+    const gameSpecificGroupPriority: Record<string, number> =
+      game.slug === 'honor-of-kings'
+        ? {
+            tokens: 0,
+            'weekly-card': 1,
+          }
+        : game.slug === 'arena-breakout'
+          ? {
+              bonds: 0,
+              passes: 1,
+            }
+          : game.slug === 'honkai-impact-3'
+            ? {
+                crystals: 0,
+                'monthly-card': 1,
+                'b-chips': 2,
+              }
+        : {};
+
     return game.packages
+      .length === 0
+      ? []
+      : availablePackages
       .map((item) => item.group)
       .filter((group): group is string => {
         if (!group || seen.has(group)) {
@@ -58,8 +509,8 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
         return true;
       })
       .sort((left, right) => {
-        const leftPriority = groupPriority[left] ?? 99;
-        const rightPriority = groupPriority[right] ?? 99;
+        const leftPriority = gameSpecificGroupPriority[left] ?? groupPriority[left] ?? 99;
+        const rightPriority = gameSpecificGroupPriority[right] ?? groupPriority[right] ?? 99;
 
         if (leftPriority !== rightPriority) {
           return leftPriority - rightPriority;
@@ -67,17 +518,17 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
 
         return left.localeCompare(right);
       });
-  }, [game.packages]);
+  }, [availablePackages, game.packages.length, game.slug]);
 
   const hasPackageGroups = packageGroups.length > 1;
 
   const visiblePackages = useMemo(() => {
     if (!hasPackageGroups || !selectedPackageGroup) {
-      return game.packages;
+      return availablePackages;
     }
 
-    return game.packages.filter((item) => item.group === selectedPackageGroup);
-  }, [game.packages, hasPackageGroups, selectedPackageGroup]);
+    return availablePackages.filter((item) => item.group === selectedPackageGroup);
+  }, [availablePackages, hasPackageGroups, selectedPackageGroup]);
 
   const selectedPaymentMethod = useMemo(
     () =>
@@ -94,8 +545,13 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
     setSelectedPaymentMethodId('');
     setIsCheckoutDialogOpen(false);
     setPlayerId('');
-    setServerZone('');
+    setSecondaryFieldValue('');
     setWhatsAppNumber('');
+    setNicknameLookup({
+      status: 'idle',
+      nickname: '',
+      message: '',
+    });
     setPaymentNotice(null);
   }, [game.slug, packageGroups]);
 
@@ -121,17 +577,112 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
     };
   }, [paymentNotice]);
 
+  useEffect(() => {
+    const trimmedPlayerId = playerId.trim();
+    const trimmedSecondaryField = secondaryFieldValue.trim();
+    const requiresSecondaryField = Boolean(game.secondaryField);
+
+    if (!trimmedPlayerId || (requiresSecondaryField && !trimmedSecondaryField)) {
+      setNicknameLookup({
+        status: 'idle',
+        nickname: '',
+        message: '',
+      });
+      return;
+    }
+
+    setNicknameLookup({
+      status: 'loading',
+      nickname: '',
+      message: '',
+    });
+
+    const nextRequestId = nicknameRequestIdRef.current + 1;
+    nicknameRequestIdRef.current = nextRequestId;
+
+    const debounceTimer = window.setTimeout(() => {
+      const fetchNickname = async () => {
+        try {
+          const response = await fetch(`${NICKNAME_API_BASE_URL}/api/nickname`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              code: game.slug,
+              target: trimmedPlayerId,
+              additional_target: trimmedSecondaryField || undefined,
+            }),
+          });
+
+          const payload = (await response.json()) as NicknameLookupResponse;
+
+          if (nicknameRequestIdRef.current !== nextRequestId) {
+            return;
+          }
+
+          if (!response.ok || payload.success === false || !payload.nickname?.trim()) {
+            setNicknameLookup({
+              status: 'error',
+              nickname: '',
+              message: 'Nickname tidak ditemukan, pastikan User ID dan Zone/Server benar.',
+            });
+            return;
+          }
+
+          setNicknameLookup({
+            status: 'success',
+            nickname: payload.nickname.trim(),
+            message: payload.message ?? 'Success.',
+          });
+        } catch {
+          if (nicknameRequestIdRef.current !== nextRequestId) {
+            return;
+          }
+
+          setNicknameLookup({
+            status: 'error',
+            nickname: '',
+            message: 'Nickname tidak ditemukan, pastikan User ID dan Zone/Server benar.',
+          });
+        }
+      };
+
+      void fetchNickname();
+    }, 700);
+
+    return () => {
+      window.clearTimeout(debounceTimer);
+    };
+  }, [game.secondaryField, game.slug, playerId, secondaryFieldValue]);
+
+  const packageDescription = useMemo(() => {
+    if (isLoadingServices) {
+      return 'Sedang memuat produk terbaru untuk game ini.';
+    }
+
+    if (servicesError) {
+      return servicesError;
+    }
+
+    if (hasPackageGroups) {
+      return 'Pilih kategori dulu, lalu tentukan nominal yang ingin kamu beli.';
+    }
+
+    return 'Nominal bisa kamu ganti lagi nanti dari data produk asli.';
+  }, [hasPackageGroups, isLoadingServices, servicesError]);
+
   const basePrice = useMemo(() => {
     if (!selectedPackage) {
       return 0;
     }
 
-    return Number(selectedPackage.price.replace(/[^\d]/g, ''));
+    return getSelectedPackageBasePrice(selectedPackage);
   }, [selectedPackage]);
 
-  const sanitizeDigits = (value: string, maxLength?: number) => {
-    const digitsOnly = value.replace(/\D/g, '');
-    return typeof maxLength === 'number' ? digitsOnly.slice(0, maxLength) : digitsOnly;
+  const sanitizeInput = (value: string, inputMode: 'numeric' | 'text' = 'numeric', maxLength?: number) => {
+    const normalizedValue = inputMode === 'numeric' ? value.replace(/\D/g, '') : value;
+    return typeof maxLength === 'number' ? normalizedValue.slice(0, maxLength) : normalizedValue;
   };
 
   const formatPrice = (value: number) => `Rp ${value.toLocaleString('id-ID')}`;
@@ -149,6 +700,38 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
       return 'Membership';
     }
 
+    if (group === 'weekly-card') {
+      return 'Weekly Card';
+    }
+
+    if (group === 'fc-points') {
+      return 'FC Points';
+    }
+
+    if (group === 'monthly-card') {
+      return 'Monthly Card';
+    }
+
+    if (group === 'b-chips') {
+      return 'B-Chips';
+    }
+
+    if (group === 'first-recharge') {
+      return 'First Recharge';
+    }
+
+    if (group === 'cash') {
+      return 'PB Cash';
+    }
+
+    if (group === 'nc') {
+      return 'NC';
+    }
+
+    if (group === 'uc') {
+      return 'UC';
+    }
+
     return group
       .split('-')
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -162,6 +745,90 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
 
     if (group === 'membership') {
       return 'MB';
+    }
+
+    if (group === 'weekly-card') {
+      return 'WC';
+    }
+
+    if (group === 'points') {
+      return 'PT';
+    }
+
+    if (group === 'tokens') {
+      return 'TK';
+    }
+
+    if (group === 'zems') {
+      return 'ZM';
+    }
+
+    if (group === 'coins') {
+      return 'CN';
+    }
+
+    if (group === 'passes') {
+      return 'PS';
+    }
+
+    if (group === 'bonds') {
+      return 'BD';
+    }
+
+    if (group === 'golds') {
+      return 'GD';
+    }
+
+    if (group === 'cp') {
+      return 'CP';
+    }
+
+    if (group === 'fc-points') {
+      return 'FC';
+    }
+
+    if (group === 'silver') {
+      return 'SV';
+    }
+
+    if (group === 'packs') {
+      return 'PK';
+    }
+
+    if (group === 'monthly-card') {
+      return 'MC';
+    }
+
+    if (group === 'b-chips') {
+      return 'BC';
+    }
+
+    if (group === 'crystals') {
+      return 'CR';
+    }
+
+    if (group === 'cores') {
+      return 'CO';
+    }
+
+    if (group === 'first-recharge') {
+      return 'FR';
+    }
+
+    if (group === 'cash') {
+      return 'PB';
+    }
+
+    if (group === 'nc') {
+      return 'NC';
+    }
+
+    if (group === 'uc') {
+      return 'UC';
+    }
+
+    if (group === 'candies') {
+      return 'CD';
     }
 
     return 'DM';
@@ -199,41 +866,13 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
     }, 220);
   };
 
-  const hasCustomerData = isMobileLegends
-    ? Boolean(playerId.trim() && serverZone.trim() && whatsAppNumber.trim())
+  const hasCustomerData = game.secondaryField
+    ? Boolean(playerId.trim() && secondaryFieldValue.trim() && whatsAppNumber.trim())
     : Boolean(playerId.trim() && whatsAppNumber.trim());
 
-  const checkoutReady = Boolean(selectedPackage && selectedPaymentMethod && hasCustomerData);
+  const isNicknameVerified = nicknameLookup.status === 'success' && Boolean(nicknameLookup.nickname);
+  const checkoutReady = Boolean(selectedPackage && selectedPaymentMethod && hasCustomerData && isNicknameVerified);
   const totalPrice = selectedPaymentMethod ? basePrice + selectedPaymentMethod.fee : basePrice;
-
-  const buildPendingPayment = (): PendingPayment | null => {
-    if (!selectedPackage || !selectedPaymentMethod || !hasCustomerData) {
-      return null;
-    }
-
-    const createdAt = new Date();
-    const expiresAt = new Date(createdAt.getTime() + 30 * 60 * 1000);
-    const randomToken = Math.random().toString(36).slice(2, 10).toUpperCase();
-    const orderPrefix = game.slug.slice(0, 2).toUpperCase();
-
-    return {
-      orderId: `${orderPrefix}-${Date.now()}-${randomToken}`,
-      createdAt: createdAt.toISOString(),
-      expiresAt: expiresAt.toISOString(),
-      gameSlug: game.slug,
-      gameTitle: game.title,
-      packageName: selectedPackage.name,
-      packagePrice: basePrice,
-      totalPrice,
-      paymentBrand: selectedPaymentMethod.brand,
-      paymentLabel: selectedPaymentMethod.label,
-      paymentFee: selectedPaymentMethod.fee,
-      playerId: playerId.trim(),
-      zoneId: serverZone.trim(),
-      whatsAppNumber: whatsAppNumber.trim(),
-      packageGroup: selectedPackage.group,
-    };
-  };
 
   const showMissingPackageNotice = () => {
     scrollToSection(packageSectionRef);
@@ -246,7 +885,7 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
   const showMissingCustomerNotice = () => {
     if (!playerId.trim()) {
       scrollToInput(playerIdInputRef);
-    } else if (isMobileLegends && !serverZone.trim()) {
+    } else if (game.secondaryField && !secondaryFieldValue.trim()) {
       scrollToInput(serverZoneInputRef);
     } else {
       scrollToInput(whatsAppInputRef);
@@ -256,6 +895,96 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
       message: 'Silahkan isi data game terlebih dahulu',
       variant: 'error',
     });
+  };
+
+  const buildPendingPayment = (): PaymentDraft | null => {
+    if (!selectedPackage) {
+      return null;
+    }
+
+    if (!selectedPaymentMethod || !hasCustomerData) {
+      return null;
+    }
+
+    if (!isNicknameVerified) {
+      return null;
+    }
+
+    const createdAt = new Date();
+    const expiresAt = new Date(createdAt.getTime() + 30 * 60 * 1000);
+    const randomToken = Math.random().toString(36).slice(2, 10).toUpperCase();
+    const orderPrefix = game.slug.slice(0, 2).toUpperCase();
+    return {
+      orderId: `${orderPrefix}-${Date.now()}-${randomToken}`,
+      createdAt: createdAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      gameSlug: game.slug,
+      gameTitle: game.title,
+      packageName: selectedPackage.name,
+      packagePrice: basePrice,
+      totalPrice,
+      paymentBrand: selectedPaymentMethod.brand,
+      paymentLabel: selectedPaymentMethod.label,
+      paymentFee: selectedPaymentMethod.fee,
+      sellingPrice: basePrice,
+      resellerPrice: selectedPackage.resellerPrice,
+      playerId: playerId.trim(),
+      playerIdLabel: game.playerIdLabel,
+      nickname: nicknameLookup.nickname,
+      zoneId: secondaryFieldValue.trim(),
+      secondaryFieldLabel: game.secondaryField?.label,
+      whatsAppNumber: whatsAppNumber.trim(),
+      packageGroup: selectedPackage.group,
+      serviceCode: selectedPackage.serviceCode,
+    };
+  };
+
+  const handleCreateInvoice = async () => {
+    if (!selectedPackage) {
+      showMissingPackageNotice();
+      return;
+    }
+
+    if (!hasCustomerData) {
+      showMissingCustomerNotice();
+      return;
+    }
+
+    if (!isNicknameVerified) {
+      scrollToInput(playerIdInputRef);
+      setPaymentNotice({
+        message: 'Nickname player harus berhasil dicek sebelum melanjutkan checkout.',
+        variant: 'error',
+      });
+      return;
+    }
+
+    setIsCreatingInvoice(true);
+
+    try {
+      const payment = buildPendingPayment();
+
+      if (!payment) {
+        return;
+      }
+
+      if (!payment.serviceCode || typeof payment.resellerPrice !== 'number') {
+        setPaymentNotice({
+          message: 'Produk ini belum siap untuk checkout otomatis. Pilih produk lain terlebih dahulu.',
+          variant: 'error',
+        });
+        return;
+      }
+
+      await onStartPayment(payment);
+    } catch (error) {
+      setPaymentNotice({
+        message: error instanceof Error ? error.message : 'Gagal membuat invoice pembayaran.',
+        variant: 'error',
+      });
+    } finally {
+      setIsCreatingInvoice(false);
+    }
   };
 
   return (
@@ -269,13 +998,16 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
         <div className="detail-layout">
           <aside className="detail-sidebar">
             <div className={`detail-hero-card ${game.accent}`}>
-              <div className="detail-hero-art">
+              <div
+                className={`detail-hero-art ${isPosterHero ? 'is-poster' : ''}`.trim()}
+                style={{ minHeight: isPosterHero ? undefined : game.heroMinHeight }}
+              >
                 <div className="detail-hero-badge">{game.category}</div>
                 {game.image ? (
                   <img
                     src={game.image}
                     alt={game.title}
-                    className={`detail-hero-image detail-hero-image-full ${game.imageFit === 'contain' ? 'is-contain' : 'is-cover'}`}
+                    className={`detail-hero-image detail-hero-image-full ${game.imageFit === 'contain' ? 'is-contain' : 'is-cover'} ${isPosterHero ? 'is-poster' : ''}`.trim()}
                     style={{
                       objectPosition: game.imagePosition ?? 'center',
                       transform: `scale(${Number.parseFloat(game.imageScale ?? '100%') / 100})`,
@@ -321,32 +1053,63 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
 
               <div className="detail-form-grid">
                 <label>
-                  <span>User ID</span>
+                  <span>{game.playerIdLabel ?? 'User ID'}</span>
                   <input
                     ref={playerIdInputRef}
                     type="text"
-                    inputMode="numeric"
-                    placeholder="Masukkan user ID"
+                    inputMode={game.playerIdInputMode ?? 'numeric'}
+                    placeholder={game.playerIdPlaceholder ?? 'Masukkan user ID'}
                     value={playerId}
-                    onChange={(event) => setPlayerId(sanitizeDigits(event.target.value))}
+                    onChange={(event) =>
+                      setPlayerId(
+                        sanitizeInput(
+                          event.target.value,
+                          game.playerIdInputMode,
+                          game.playerIdMaxLength,
+                        ),
+                      )
+                    }
                   />
                 </label>
-                {isMobileLegends ? (
+                {game.secondaryField ? (
                   <label>
-                    <span>Server / Zone</span>
+                    <span>{game.secondaryField.label}</span>
                     <input
                       ref={serverZoneInputRef}
                       type="text"
-                      inputMode="numeric"
-                      maxLength={8}
-                      placeholder="Masukkan server ID"
-                      value={serverZone}
+                      inputMode={game.secondaryField.inputMode ?? 'numeric'}
+                      maxLength={game.secondaryField.maxLength}
+                      placeholder={game.secondaryField.placeholder}
+                      value={secondaryFieldValue}
                       onChange={(event) =>
-                        setServerZone(sanitizeDigits(event.target.value, 8))
+                        setSecondaryFieldValue(
+                          sanitizeInput(
+                            event.target.value,
+                            game.secondaryField?.inputMode,
+                            game.secondaryField?.maxLength,
+                          ),
+                        )
                       }
                     />
                   </label>
                 ) : null}
+                <div className="detail-form-feedback detail-form-feedback-full" aria-live="polite">
+                  {nicknameLookup.status === 'loading' ? (
+                    <p className="detail-nickname-state is-loading">Sedang mengecek nickname...</p>
+                  ) : null}
+
+                  {nicknameLookup.status === 'success' ? (
+                    <p className="detail-nickname-state is-success">
+                      Nickname: <strong>{nicknameLookup.nickname}</strong>
+                    </p>
+                  ) : null}
+
+                  {nicknameLookup.status === 'error' ? (
+                    <p className="detail-nickname-state is-error">
+                      Nickname tidak ditemukan, pastikan User ID dan Zone/Server benar.
+                    </p>
+                  ) : null}
+                </div>
                 <label className="detail-form-full">
                   <span>Nomor WhatsApp</span>
                   <input
@@ -356,10 +1119,18 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
                     inputMode="numeric"
                     maxLength={13}
                     value={whatsAppNumber}
-                    onChange={(event) => setWhatsAppNumber(sanitizeDigits(event.target.value, 13))}
+                    onChange={(event) => setWhatsAppNumber(sanitizeInput(event.target.value, 'numeric', 13))}
                   />
                 </label>
               </div>
+
+              {game.accountInstructions?.length ? (
+                <div className="detail-payment-note">
+                  {game.accountInstructions.map((instruction) => (
+                    <p key={instruction}>{instruction}</p>
+                  ))}
+                </div>
+              ) : null}
             </section>
 
             <section ref={packageSectionRef} className="detail-panel">
@@ -367,11 +1138,7 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
                 <span className="detail-step">2</span>
                 <div>
                   <h2>Pilih Nominal Top Up</h2>
-                  <p>
-                    {hasPackageGroups
-                      ? 'Pilih kategori dulu, lalu tentukan nominal yang ingin kamu beli.'
-                      : 'Nominal bisa kamu ganti lagi nanti dari data produk asli.'}
-                  </p>
+                  <p>{packageDescription}</p>
                 </div>
               </div>
 
@@ -448,11 +1215,8 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
                     >
                       <div className="detail-payment-methods">
                         {group.methods.map((method) => (
-                          <span
-                            key={method.id}
-                            className={`detail-payment-badge detail-payment-badge-${group.id}`}
-                          >
-                            {method.brand}
+                          <span key={method.id} className="detail-payment-method-visual">
+                            {renderPaymentMethodVisual(group.id, method, 'detail-payment-logo detail-payment-logo-inline')}
                           </span>
                         ))}
                       </div>
@@ -497,8 +1261,8 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
                                     );
                                   }}
                                 >
-                                  <span className={`detail-payment-option-brand detail-payment-badge-${group.id}`}>
-                                    {method.brand}
+                                  <span className="detail-payment-option-brand">
+                                    {renderPaymentMethodVisual(group.id, method)}
                                   </span>
                                   <strong>{selectedPackage ? formatPrice(totalPrice) : 'Pilih item terlebih dahulu'}</strong>
                                   <small>{method.label}</small>
@@ -518,8 +1282,8 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
               <p className="detail-payment-note">
                 {selectedPackage ? (
                   <>
-                    Harga pembayaran otomatis mengikuti nominal <strong>{selectedPackage.name}</strong> dengan dasar
-                    harga <strong>{formatPrice(basePrice)}</strong>.
+                    Harga pembayaran otomatis mengikuti nominal <strong>{selectedPackage.name}</strong> dengan dasar harga{' '}
+                    <strong>{formatPrice(basePrice)}</strong>.
                   </>
                 ) : (
                   <>Pilih nominal top up dulu supaya harga di metode pembayaran muncul sesuai produk yang dipilih.</>
@@ -597,13 +1361,16 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
               <div className="detail-dialog-section">
                 <h3>Data Player</h3>
                 <div className="detail-dialog-grid">
-                  <span>User ID</span>
+                  <span>{game.playerIdLabel ?? 'User ID'}</span>
                   <strong>{playerId}</strong>
 
-                  {isMobileLegends ? (
+                  <span>Nickname</span>
+                  <strong>{nicknameLookup.nickname || '-'}</strong>
+
+                  {game.secondaryField ? (
                     <>
-                      <span>Zone ID</span>
-                      <strong>{serverZone}</strong>
+                      <span>{game.secondaryField.label}</span>
+                      <strong>{secondaryFieldValue}</strong>
                     </>
                   ) : null}
 
@@ -643,15 +1410,10 @@ const GameDetailPage = ({ game, onBack, onStartPayment }: GameDetailPageProps) =
                 <button
                   type="button"
                   className="detail-dialog-confirm"
+                  disabled={isCreatingInvoice || !isNicknameVerified}
                   onClick={() => {
-                    const payment = buildPendingPayment();
-
-                    if (!payment) {
-                      return;
-                    }
-
                     setIsCheckoutDialogOpen(false);
-                    onStartPayment(payment);
+                    void handleCreateInvoice();
                   }}
                 >
                   <span>Beli Sekarang</span>
